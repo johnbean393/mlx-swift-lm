@@ -12,7 +12,167 @@ import MLX
 import MLXLMCommon
 import MLXNN
 
+private func makeQwen35VerifyQMMKernel() -> MLXFast.MLXFastKernel? {
+    let source = """
+        using namespace metal;
+        constexpr int BM = 16;
+        constexpr int BN = 32;
+        constexpr int BK = 32;
+        constexpr int BK_SUB = 8;
+        constexpr int GS = 64;
+
+        uint tid = thread_position_in_threadgroup.x;
+        uint sg_id = tid / 32;
+        uint tg_n = threadgroup_position_in_grid.y;
+
+        int K = int(K_size);
+        int N = int(N_size);
+        int K_by_8 = K / 8;
+        int K_by_gs = K / GS;
+        int n0 = int(tg_n) * BN;
+
+        threadgroup T B_tile[BK * BN];
+
+        simdgroup_matrix<T, 8, 8> a_top, a_bot, b_L, b_R;
+        simdgroup_matrix<float, 8, 8> c_tL = simdgroup_matrix<float, 8, 8>(0.0f);
+        simdgroup_matrix<float, 8, 8> c_tR = simdgroup_matrix<float, 8, 8>(0.0f);
+        simdgroup_matrix<float, 8, 8> c_bL = simdgroup_matrix<float, 8, 8>(0.0f);
+        simdgroup_matrix<float, 8, 8> c_bR = simdgroup_matrix<float, 8, 8>(0.0f);
+
+        int t_a = int(tid);
+        int t_b = int(tid) + 64;
+        int dq_k_a = t_a / BN, dq_n_a = t_a % BN;
+        int dq_k_b = t_b / BN, dq_n_b = t_b % BN;
+
+        int sg_n_off = int(sg_id) * 16;
+
+        for (int k0 = 0; k0 < K; k0 += BK) {
+            {
+                int n_global = n0 + dq_n_a;
+                int k_base = k0 + dq_k_a * 8;
+                uint32_t packed = w_q[n_global * K_by_8 + (k_base >> 3)];
+                float s = float(scales[n_global * K_by_gs + (k_base / GS)]);
+                float b = float(biases[n_global * K_by_gs + (k_base / GS)]);
+                for (int ki = 0; ki < 8; ++ki) {
+                    uint32_t nib = (packed >> (ki * 4)) & 0xFu;
+                    B_tile[(dq_k_a * 8 + ki) * BN + dq_n_a] = T(float(nib) * s + b);
+                }
+            }
+            {
+                int n_global = n0 + dq_n_b;
+                int k_base = k0 + dq_k_b * 8;
+                uint32_t packed = w_q[n_global * K_by_8 + (k_base >> 3)];
+                float s = float(scales[n_global * K_by_gs + (k_base / GS)]);
+                float b = float(biases[n_global * K_by_gs + (k_base / GS)]);
+                for (int ki = 0; ki < 8; ++ki) {
+                    uint32_t nib = (packed >> (ki * 4)) & 0xFu;
+                    B_tile[(dq_k_b * 8 + ki) * BN + dq_n_b] = T(float(nib) * s + b);
+                }
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            for (int ks = 0; ks < BK / BK_SUB; ++ks) {
+                simdgroup_load(a_top, x + k0 + ks * BK_SUB, K);
+                simdgroup_load(a_bot, x + 8 * K + k0 + ks * BK_SUB, K);
+                simdgroup_load(b_L, B_tile + ks * BK_SUB * BN + sg_n_off, BN);
+                simdgroup_load(b_R, B_tile + ks * BK_SUB * BN + sg_n_off + 8, BN);
+                simdgroup_multiply_accumulate(c_tL, a_top, b_L, c_tL);
+                simdgroup_multiply_accumulate(c_tR, a_top, b_R, c_tR);
+                simdgroup_multiply_accumulate(c_bL, a_bot, b_L, c_bL);
+                simdgroup_multiply_accumulate(c_bR, a_bot, b_R, c_bR);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+
+        simdgroup_matrix<T, 8, 8> c_tL_T, c_tR_T, c_bL_T, c_bR_T;
+        c_tL_T.thread_elements()[0] = T(c_tL.thread_elements()[0]);
+        c_tL_T.thread_elements()[1] = T(c_tL.thread_elements()[1]);
+        c_tR_T.thread_elements()[0] = T(c_tR.thread_elements()[0]);
+        c_tR_T.thread_elements()[1] = T(c_tR.thread_elements()[1]);
+        c_bL_T.thread_elements()[0] = T(c_bL.thread_elements()[0]);
+        c_bL_T.thread_elements()[1] = T(c_bL.thread_elements()[1]);
+        c_bR_T.thread_elements()[0] = T(c_bR.thread_elements()[0]);
+        c_bR_T.thread_elements()[1] = T(c_bR.thread_elements()[1]);
+        simdgroup_store(c_tL_T, y + n0 + sg_n_off, N);
+        simdgroup_store(c_tR_T, y + n0 + sg_n_off + 8, N);
+        simdgroup_store(c_bL_T, y + 8 * N + n0 + sg_n_off, N);
+        simdgroup_store(c_bR_T, y + 8 * N + n0 + sg_n_off + 8, N);
+    """
+    return MLXFast.metalKernel(
+        name: "qwen35_verify_qmm_4bit_gs64",
+        inputNames: ["x", "w_q", "scales", "biases", "M_size", "K_size", "N_size"],
+        outputNames: ["y"],
+        source: source
+    )
+}
+
+private final class Qwen35VerifyQMMKernelManager: Sendable {
+    static let shared = Qwen35VerifyQMMKernelManager()
+    let kernel: MLXFast.MLXFastKernel?
+
+    private init() {
+        kernel = makeQwen35VerifyQMMKernel()
+    }
+}
+
+private func qwen35VerifyQMM(_ linear: QuantizedLinear, _ x: MLXArray) -> MLXArray? {
+    guard
+        ProcessInfo.processInfo.environment["DFLASH_QWEN_VERIFY_QMM"] == "1",
+        x.ndim == 3,
+        x.dim(0) == 1,
+        x.dim(1) <= 16,
+        linear.bits == 4,
+        linear.groupSize == 64,
+        let quantizationBiases = linear.biases,
+        let kernel = Qwen35VerifyQMMKernelManager.shared.kernel
+    else {
+        return nil
+    }
+
+    let sequenceLength = x.dim(1)
+    let inputDimensions = x.dim(2)
+    let outputDimensions = linear.shape.0
+    guard outputDimensions % 32 == 0, inputDimensions % 64 == 0 else {
+        return nil
+    }
+
+    let padded: MLXArray
+    if sequenceLength < 16 {
+        padded = concatenated([
+            x,
+            MLXArray.zeros([1, 16 - sequenceLength, inputDimensions], dtype: x.dtype),
+        ], axis: 1)
+    } else {
+        padded = x
+    }
+
+    let output = kernel(
+        [
+            padded.reshaped(16, inputDimensions),
+            linear.weight,
+            linear.scales,
+            quantizationBiases,
+            MLXArray(16),
+            MLXArray(inputDimensions),
+            MLXArray(outputDimensions),
+        ],
+        template: [("T", x.dtype)],
+        grid: (128, outputDimensions / 32, 1),
+        threadGroup: (128, 1, 1),
+        outputShapes: [[16, outputDimensions]],
+        outputDTypes: [x.dtype]
+    )[0].reshaped(1, 16, outputDimensions)[0..., 0 ..< sequenceLength, 0...]
+
+    if let bias = linear.bias {
+        return output + bias
+    }
+    return output
+}
+
 func qwen35Linear(_ linear: Linear, _ x: MLXArray) -> MLXArray {
+    if let quantized = linear as? QuantizedLinear, let output = qwen35VerifyQMM(quantized, x) {
+        return output
+    }
     guard
         ProcessInfo.processInfo.environment["DFLASH_QWEN_DEQUANT_LINEAR"] == "1",
         x.ndim == 3,
