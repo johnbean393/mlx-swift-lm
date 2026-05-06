@@ -528,6 +528,11 @@ func gatedDeltaUpdateWithTape(
     let Dv = v.dim(3)
 
     let state = state ?? MLXArray.zeros([B, Hv, Dv, Dk], dtype: .float32)
+    let metalResult: (MLXArray, MLXArray)? =
+        (!GatedDeltaKernelManager.shared.kernelsDisabled && GatedDeltaKernelManager.shared.kernel != nil)
+        ? gatedDeltaKernel(q: q, k: k, v: v, g: g, beta: beta, state: state, mask: mask)
+        : nil
+
     let (out, newState, tape) = gatedDeltaOpsWithTape(
         q: q,
         k: k,
@@ -537,5 +542,8 @@ func gatedDeltaUpdateWithTape(
         state: state,
         mask: mask
     )
+    if let metalResult {
+        return (metalResult.0, metalResult.1, tape, g)
+    }
     return (out, newState, tape, g)
 }
