@@ -613,7 +613,8 @@ final class Qwen35Attention: Module {
 
         let cachedPrefixLength = cache.offset
         let (cachedKeys, cachedValues) = cache.update(keys: keys, values: values)
-        guard cachedPrefixLength >= 1024, queries.dim(2) > 1 else {
+        let requiresExactSplit = queries.dim(2) > 8 || (cachedPrefixLength >= 1024 && queries.dim(2) > 1)
+        guard requiresExactSplit else {
             return MLXFast.scaledDotProductAttention(
                 queries: queries,
                 keys: cachedKeys,
