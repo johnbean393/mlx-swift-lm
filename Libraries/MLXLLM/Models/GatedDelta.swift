@@ -525,18 +525,6 @@ func gatedDeltaUpdateWithTape(
     let Dv = v.dim(3)
 
     let state = state ?? MLXArray.zeros([B, Hv, Dv, Dk], dtype: .float32)
-    if !GatedDeltaKernelManager.shared.kernelsDisabled, let result = gatedDeltaKernelWithTape(
-        q: q,
-        k: k,
-        v: v,
-        g: g,
-        beta: beta,
-        state: state,
-        mask: mask
-    ) {
-        return (result.0, result.1, result.2, g)
-    }
-
     let (out, newState, tape) = gatedDeltaOpsWithTape(
         q: q,
         k: k,
