@@ -225,6 +225,23 @@ final class Qwen35GatedDeltaNet: Module {
         super.init()
     }
 
+    private func exactSmallProjection(_ linear: Linear, _ inputs: MLXArray, padM: Int = 16)
+        -> MLXArray
+    {
+        guard inputs.ndim == 3, inputs.dim(1) < padM else {
+            return linear(inputs)
+        }
+        let batch = inputs.dim(0)
+        let sequenceLength = inputs.dim(1)
+        let hidden = inputs.dim(2)
+        let pad = MLXArray.zeros(
+            [batch, padM - sequenceLength, hidden],
+            dtype: inputs.dtype
+        )
+        let padded = concatenated([inputs, pad], axis: 1)
+        return linear(padded)[0..., 0 ..< sequenceLength, 0...]
+    }
+
     func callAsFunction(
         _ inputs: MLXArray,
         mask: MLXArray? = nil,
@@ -235,8 +252,8 @@ final class Qwen35GatedDeltaNet: Module {
 
         var qkv = inProjQKV(inputs)
         let z = inProjZ(inputs).reshaped(B, S, numVHeads, headVDim)
-        let b = inProjB(inputs)
-        let a = inProjA(inputs)
+        let b = exactSmallProjection(inProjB, inputs)
+        let a = exactSmallProjection(inProjA, inputs)
 
         let convState: MLXArray
         if let cacheState = cache?[0] {
