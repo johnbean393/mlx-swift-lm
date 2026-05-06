@@ -135,19 +135,6 @@ private func qwen35VerifyQMM(_ linear: QuantizedLinear, _ x: MLXArray) -> MLXArr
         return nil
     }
 
-    if sequenceLength > 8 {
-        var chunks = [MLXArray]()
-        chunks.reserveCapacity((sequenceLength + 7) / 8)
-        for start in stride(from: 0, to: sequenceLength, by: 8) {
-            let end = min(start + 8, sequenceLength)
-            guard let chunk = qwen35VerifyQMM(linear, x[0..., start ..< end, 0...]) else {
-                return nil
-            }
-            chunks.append(chunk)
-        }
-        return concatenated(chunks, axis: 1)
-    }
-
     let padded: MLXArray
     if sequenceLength < 16 {
         padded = concatenated([
