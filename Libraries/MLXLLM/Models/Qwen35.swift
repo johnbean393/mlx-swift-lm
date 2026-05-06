@@ -115,6 +115,221 @@ private final class Qwen35VerifyQMMKernelManager: Sendable {
     }
 }
 
+private func makeQwen35DecodeQMVKernel() -> MLXFast.MLXFastKernel? {
+    let source = """
+        constexpr int GS = 64;
+        constexpr int SG = 8;
+
+        uint tid = thread_position_in_threadgroup.x;
+        uint lane = tid & 31u;
+        uint sg = tid >> 5;
+        uint n = threadgroup_position_in_grid.x * SG + sg;
+
+        int K = int(K_size);
+        int N = int(N_size);
+        int K_by_8 = K / 8;
+        int K_by_gs = K / GS;
+
+        float sum = 0.0f;
+        if (n < uint(N)) {
+            for (int packed_k = int(lane); packed_k < K_by_8; packed_k += 32) {
+                uint32_t packed = w_q[n * K_by_8 + packed_k];
+                int k_base = packed_k << 3;
+                float s = float(scales[n * K_by_gs + (k_base / GS)]);
+                float b = float(biases[n * K_by_gs + (k_base / GS)]);
+                for (int i = 0; i < 8; ++i) {
+                    uint32_t nib = (packed >> (i * 4)) & 0xFu;
+                    sum += float(x[k_base + i]) * (float(nib) * s + b);
+                }
+            }
+            sum = simd_sum(sum);
+            if (lane == 0) {
+                y[n] = T(sum);
+            }
+        }
+    """
+    return MLXFast.metalKernel(
+        name: "qwen35_decode_qmv_4bit_gs64",
+        inputNames: ["x", "w_q", "scales", "biases", "K_size", "N_size"],
+        outputNames: ["y"],
+        source: source
+    )
+}
+
+private final class Qwen35DecodeQMVKernelManager: Sendable {
+    static let shared = Qwen35DecodeQMVKernelManager()
+    let kernel: MLXFast.MLXFastKernel?
+
+    private init() {
+        kernel = makeQwen35DecodeQMVKernel()
+    }
+}
+
+private func makeQwen35DecodePairQMVKernel() -> MLXFast.MLXFastKernel? {
+    let source = """
+        constexpr int GS = 64;
+        constexpr int SG = 16;
+
+        uint tid = thread_position_in_threadgroup.x;
+        uint lane = tid & 31u;
+        uint sg = tid >> 5;
+        uint out_idx = threadgroup_position_in_grid.x * SG + sg;
+
+        int K = int(K_size);
+        int N = int(N_size);
+        int K_by_8 = K / 8;
+        int K_by_gs = K / GS;
+        bool second = out_idx >= uint(N);
+        uint n = second ? out_idx - uint(N) : out_idx;
+
+        device const uint32_t * w = second ? w1 : w0;
+        device const T * scales = second ? scales1 : scales0;
+        device const T * biases = second ? biases1 : biases0;
+        device T * y = second ? y1 : y0;
+
+        float sum = 0.0f;
+        if (n < uint(N)) {
+            for (int packed_k = int(lane); packed_k < K_by_8; packed_k += 32) {
+                uint32_t packed = w[n * K_by_8 + packed_k];
+                int k_base = packed_k << 3;
+                float s = float(scales[n * K_by_gs + (k_base / GS)]);
+                float b = float(biases[n * K_by_gs + (k_base / GS)]);
+                for (int i = 0; i < 8; ++i) {
+                    uint32_t nib = (packed >> (i * 4)) & 0xFu;
+                    sum += float(x[k_base + i]) * (float(nib) * s + b);
+                }
+            }
+            sum = simd_sum(sum);
+            if (lane == 0) {
+                y[n] = T(sum);
+            }
+        }
+    """
+    return MLXFast.metalKernel(
+        name: "qwen35_decode_pair_qmv_4bit_gs64",
+        inputNames: [
+            "x",
+            "w0", "scales0", "biases0",
+            "w1", "scales1", "biases1",
+            "K_size", "N_size",
+        ],
+        outputNames: ["y0", "y1"],
+        source: source
+    )
+}
+
+private final class Qwen35DecodePairQMVKernelManager: Sendable {
+    static let shared = Qwen35DecodePairQMVKernelManager()
+    let kernel: MLXFast.MLXFastKernel?
+
+    private init() {
+        kernel = makeQwen35DecodePairQMVKernel()
+    }
+}
+
+private func qwen35DecodePairQMV(
+    _ lhs: Linear,
+    _ rhs: Linear,
+    _ x: MLXArray
+) -> (MLXArray, MLXArray)? {
+    guard ProcessInfo.processInfo.environment["DFLASH_QWEN_DECODE_QMV"] != "0" else {
+        return nil
+    }
+    guard
+        x.ndim == 3,
+        x.dim(0) == 1,
+        x.dim(1) == 1,
+        let lhs = lhs as? QuantizedLinear,
+        let rhs = rhs as? QuantizedLinear,
+        lhs.bits == 4,
+        rhs.bits == 4,
+        lhs.groupSize == 64,
+        rhs.groupSize == 64,
+        lhs.shape.0 == rhs.shape.0,
+        lhs.shape.1 == rhs.shape.1,
+        lhs.bias == nil,
+        rhs.bias == nil,
+        let lhsBiases = lhs.biases,
+        let rhsBiases = rhs.biases,
+        let kernel = Qwen35DecodePairQMVKernelManager.shared.kernel
+    else {
+        return nil
+    }
+
+    let inputDimensions = x.dim(2)
+    let outputDimensions = lhs.shape.0
+    guard inputDimensions % 64 == 0 else {
+        return nil
+    }
+
+    let outputs = kernel(
+        [
+            x.reshaped(inputDimensions),
+            lhs.weight,
+            lhs.scales,
+            lhsBiases,
+            rhs.weight,
+            rhs.scales,
+            rhsBiases,
+            MLXArray(inputDimensions),
+            MLXArray(outputDimensions),
+        ],
+        template: [("T", x.dtype)],
+        grid: (((outputDimensions * 2) + 15) / 16, 1, 1),
+        threadGroup: (512, 1, 1),
+        outputShapes: [[outputDimensions], [outputDimensions]],
+        outputDTypes: [x.dtype, x.dtype]
+    )
+    return (
+        outputs[0].reshaped(1, 1, outputDimensions),
+        outputs[1].reshaped(1, 1, outputDimensions)
+    )
+}
+
+private func qwen35DecodeQMV(_ linear: QuantizedLinear, _ x: MLXArray) -> MLXArray? {
+    guard ProcessInfo.processInfo.environment["DFLASH_QWEN_DECODE_QMV"] != "0" else {
+        return nil
+    }
+    guard
+        x.ndim == 3,
+        x.dim(0) == 1,
+        x.dim(1) == 1,
+        linear.bits == 4,
+        linear.groupSize == 64,
+        let quantizationBiases = linear.biases,
+        let kernel = Qwen35DecodeQMVKernelManager.shared.kernel
+    else {
+        return nil
+    }
+
+    let inputDimensions = x.dim(2)
+    let outputDimensions = linear.shape.0
+    guard inputDimensions % 64 == 0 else {
+        return nil
+    }
+
+    let output = kernel(
+        [
+            x.reshaped(inputDimensions),
+            linear.weight,
+            linear.scales,
+            quantizationBiases,
+            MLXArray(inputDimensions),
+            MLXArray(outputDimensions),
+        ],
+        template: [("T", x.dtype)],
+        grid: ((outputDimensions + 7) / 8, 1, 1),
+        threadGroup: (256, 1, 1),
+        outputShapes: [[outputDimensions]],
+        outputDTypes: [x.dtype]
+    )[0].reshaped(1, 1, outputDimensions)
+
+    if let bias = linear.bias {
+        return output + bias
+    }
+    return output
+}
+
 private func qwen35VerifyQMM(_ linear: QuantizedLinear, _ x: MLXArray) -> MLXArray? {
     guard ProcessInfo.processInfo.environment["DFLASH_QWEN_VERIFY_QMM"] != "0" else {
         return nil
@@ -122,6 +337,7 @@ private func qwen35VerifyQMM(_ linear: QuantizedLinear, _ x: MLXArray) -> MLXArr
     guard
         x.ndim == 3,
         x.dim(0) == 1,
+        x.dim(1) > 1,
         x.dim(1) <= 16,
         linear.bits == 4,
         linear.groupSize == 64,
@@ -172,6 +388,9 @@ private func qwen35VerifyQMM(_ linear: QuantizedLinear, _ x: MLXArray) -> MLXArr
 }
 
 func qwen35Linear(_ linear: Linear, _ x: MLXArray) -> MLXArray {
+    if let quantized = linear as? QuantizedLinear, let output = qwen35DecodeQMV(quantized, x) {
+        return output
+    }
     if let quantized = linear as? QuantizedLinear, let output = qwen35VerifyQMM(quantized, x) {
         return output
     }
@@ -414,7 +633,7 @@ final class Qwen35GatedDeltaNet: Module {
     private func exactSmallProjection(_ linear: Linear, _ inputs: MLXArray, padM: Int = 16)
         -> MLXArray
     {
-        guard inputs.ndim == 3, inputs.dim(1) < padM else {
+        guard inputs.ndim == 3, inputs.dim(1) > 1, inputs.dim(1) < padM else {
             return qwen35Linear(linear, inputs)
         }
         let batch = inputs.dim(0)
@@ -438,8 +657,15 @@ final class Qwen35GatedDeltaNet: Module {
 
         var qkv = qwen35Linear(inProjQKV, inputs)
         let z = qwen35Linear(inProjZ, inputs).reshaped(B, S, numVHeads, headVDim)
-        let b = exactSmallProjection(inProjB, inputs)
-        let a = exactSmallProjection(inProjA, inputs)
+        let b: MLXArray
+        let a: MLXArray
+        if let pair = qwen35DecodePairQMV(inProjB, inProjA, inputs) {
+            b = pair.0
+            a = pair.1
+        } else {
+            b = exactSmallProjection(inProjB, inputs)
+            a = exactSmallProjection(inProjA, inputs)
+        }
 
         let convState: MLXArray
         if let cacheState = cache?[0] {
