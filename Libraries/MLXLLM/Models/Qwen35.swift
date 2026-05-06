@@ -1204,6 +1204,9 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
             if layer.isLinear {
                 return DFlashRecurrentRollbackCache(convKernelSize: configuration.linearConvKernelDim)
             }
+            if let maxKVSize = parameters?.maxKVSize {
+                return RotatingKVCache(maxSize: maxKVSize, keep: 4)
+            }
             return KVCacheSimple()
         }
     }
