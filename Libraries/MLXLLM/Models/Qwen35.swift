@@ -386,7 +386,7 @@ private func qwen35DecodeQMV(_ linear: QuantizedLinear, _ x: MLXArray) -> MLXArr
 }
 
 private func qwen35VerifyRowQMV(_ linear: QuantizedLinear, _ x: MLXArray) -> MLXArray? {
-    guard ProcessInfo.processInfo.environment["DFLASH_QWEN_VERIFY_ROW_QMV"] != "0" else {
+    guard ProcessInfo.processInfo.environment["DFLASH_QWEN_VERIFY_ROW_QMV"] == "1" else {
         return nil
     }
     guard
@@ -433,7 +433,7 @@ private func qwen35VerifyRowQMV(_ linear: QuantizedLinear, _ x: MLXArray) -> MLX
 }
 
 private func qwen35VerifyQMM(_ linear: QuantizedLinear, _ x: MLXArray) -> MLXArray? {
-    guard ProcessInfo.processInfo.environment["DFLASH_QWEN_VERIFY_QMM"] != "0" else {
+    guard ProcessInfo.processInfo.environment["DFLASH_QWEN_VERIFY_QMM"] == "1" else {
         return nil
     }
     guard
