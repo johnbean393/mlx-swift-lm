@@ -630,10 +630,10 @@ final class Qwen35Attention: Module {
             let chunkMask: MLXFast.ScaledDotProductAttentionMaskMode
             switch mask {
             case .array(let array):
-                chunkMask = .array(array[0..., 0..., index ..< (index + 1), 0 ..< keyEnd])
+                chunkMask = .array(Self.sliceAttentionMask(array, queryIndex: index, keyEnd: keyEnd))
             case .arrays(let arrays):
                 if let array = arrays.first {
-                    chunkMask = .array(array[0..., 0..., index ..< (index + 1), 0 ..< keyEnd])
+                    chunkMask = .array(Self.sliceAttentionMask(array, queryIndex: index, keyEnd: keyEnd))
                 } else {
                     chunkMask = .none
                 }
@@ -649,6 +649,17 @@ final class Qwen35Attention: Module {
             ))
         }
         return concatenated(chunks, axis: 2)
+    }
+
+    private static func sliceAttentionMask(
+        _ mask: MLXArray,
+        queryIndex: Int,
+        keyEnd: Int
+    ) -> MLXArray {
+        if mask.ndim == 2 {
+            return mask[queryIndex ..< (queryIndex + 1), 0 ..< keyEnd]
+        }
+        return mask[0..., 0..., queryIndex ..< (queryIndex + 1), 0 ..< keyEnd]
     }
 }
 
