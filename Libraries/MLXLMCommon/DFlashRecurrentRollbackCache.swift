@@ -93,6 +93,7 @@ private final class DFlashTapeReplayKernelManager: Sendable {
 
 public final class DFlashRecurrentRollbackCache: MambaCache {
     public private(set) var isArmed = false
+    public private(set) var armedPrefixLength = 0
 
     private let convKernelSize: Int
     private var tape: MLXArray?
@@ -107,7 +108,7 @@ public final class DFlashRecurrentRollbackCache: MambaCache {
     }
 
     public func armRollback(prefixLength: Int = 0) {
-        _ = prefixLength
+        armedPrefixLength = prefixLength
         isArmed = true
         tape = nil
         tapeK = nil
@@ -154,6 +155,7 @@ public final class DFlashRecurrentRollbackCache: MambaCache {
 
     public func clearTransients() {
         isArmed = false
+        armedPrefixLength = 0
         tape = nil
         tapeK = nil
         tapeG = nil

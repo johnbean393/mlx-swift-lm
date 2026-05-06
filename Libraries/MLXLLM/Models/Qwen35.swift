@@ -488,7 +488,8 @@ final class Qwen35GatedDeltaNet: Module {
                 aLog: aLog,
                 dtBias: dtBias,
                 state: state,
-                mask: mask
+                mask: mask,
+                preferMetalTape: rollbackCache.armedPrefixLength < 1024
             )
             rollbackCache.recordTape(tape: tape, k: kNormed, g: g, qkv: qkv)
         } else {
