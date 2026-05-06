@@ -355,7 +355,7 @@ private func gatedDeltaStepOps(
         state = MLX.where(expandedMask, state, oldState)
     }
 
-    return (y, state)
+    return (y.asType(q.dtype), state)
 }
 
 func gatedDeltaOps(
