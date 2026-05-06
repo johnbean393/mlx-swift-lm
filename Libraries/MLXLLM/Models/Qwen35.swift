@@ -117,7 +117,6 @@ private final class Qwen35VerifyQMMKernelManager: Sendable {
 
 private func qwen35VerifyQMM(_ linear: QuantizedLinear, _ x: MLXArray) -> MLXArray? {
     guard
-        ProcessInfo.processInfo.environment["DFLASH_QWEN_VERIFY_QMM"] == "1",
         x.ndim == 3,
         x.dim(0) == 1,
         x.dim(1) <= 16,
