@@ -284,10 +284,10 @@ private func qwen35DecodePairQMV(
     _ rhs: Linear,
     _ x: MLXArray
 ) -> (MLXArray, MLXArray)? {
-    guard ProcessInfo.processInfo.environment["DFLASH_QWEN_DECODE_PAIR_QMV"] != "0" else {
+    guard ProcessInfo.processInfo.environment["DFLASH_QWEN_DECODE_PAIR_QMV"] == "1" else {
         return nil
     }
-    guard ProcessInfo.processInfo.environment["DFLASH_QWEN_DECODE_QMV"] != "0" else {
+    guard ProcessInfo.processInfo.environment["DFLASH_QWEN_DECODE_QMV"] == "1" else {
         return nil
     }
     guard
@@ -342,7 +342,7 @@ private func qwen35DecodePairQMV(
 }
 
 private func qwen35DecodeQMV(_ linear: QuantizedLinear, _ x: MLXArray) -> MLXArray? {
-    guard ProcessInfo.processInfo.environment["DFLASH_QWEN_DECODE_QMV"] != "0" else {
+    guard ProcessInfo.processInfo.environment["DFLASH_QWEN_DECODE_QMV"] == "1" else {
         return nil
     }
     guard
