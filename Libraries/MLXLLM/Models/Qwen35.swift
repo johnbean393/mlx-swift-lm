@@ -12,6 +12,30 @@ import MLX
 import MLXLMCommon
 import MLXNN
 
+func qwen35Linear(_ linear: Linear, _ x: MLXArray) -> MLXArray {
+    guard
+        ProcessInfo.processInfo.environment["DFLASH_QWEN_DEQUANT_LINEAR"] == "1",
+        x.ndim == 3,
+        x.dim(1) <= 16,
+        let quantized = linear as? QuantizedLinear
+    else {
+        return linear(x)
+    }
+    let weight = dequantized(
+        quantized.weight,
+        scales: quantized.scales,
+        biases: quantized.biases,
+        groupSize: quantized.groupSize,
+        bits: quantized.bits,
+        mode: quantized.mode
+    )
+    var out = matmul(x, weight.T)
+    if let bias = quantized.bias {
+        out = out + bias
+    }
+    return out
+}
+
 // MARK: - Configuration
 
 private enum RopeParametersCodingKey: String, CodingKey {
@@ -229,7 +253,7 @@ final class Qwen35GatedDeltaNet: Module {
         -> MLXArray
     {
         guard inputs.ndim == 3, inputs.dim(1) < padM else {
-            return linear(inputs)
+            return qwen35Linear(linear, inputs)
         }
         let batch = inputs.dim(0)
         let sequenceLength = inputs.dim(1)
@@ -239,7 +263,7 @@ final class Qwen35GatedDeltaNet: Module {
             dtype: inputs.dtype
         )
         let padded = concatenated([inputs, pad], axis: 1)
-        return linear(padded)[0..., 0 ..< sequenceLength, 0...]
+        return qwen35Linear(linear, padded)[0..., 0 ..< sequenceLength, 0...]
     }
 
     func callAsFunction(
@@ -250,8 +274,8 @@ final class Qwen35GatedDeltaNet: Module {
         let B = inputs.dim(0)
         let S = inputs.dim(1)
 
-        var qkv = inProjQKV(inputs)
-        let z = inProjZ(inputs).reshaped(B, S, numVHeads, headVDim)
+        var qkv = qwen35Linear(inProjQKV, inputs)
+        let z = qwen35Linear(inProjZ, inputs).reshaped(B, S, numVHeads, headVDim)
         let b = exactSmallProjection(inProjB, inputs)
         let a = exactSmallProjection(inProjA, inputs)
 
@@ -324,7 +348,7 @@ final class Qwen35GatedDeltaNet: Module {
         }
 
         out = norm(out, gate: z)
-        return outProj(out.reshaped(B, S, -1))
+        return qwen35Linear(outProj, out.reshaped(B, S, -1))
     }
 }
 
@@ -381,13 +405,13 @@ final class Qwen35Attention: Module {
         let B = x.dim(0)
         let L = x.dim(1)
 
-        let qProjOutput = qProj(x)
+        let qProjOutput = qwen35Linear(qProj, x)
         let qSplit = qProjOutput.reshaped(B, L, attentionHeads, -1).split(parts: 2, axis: -1)
         var queries = qSplit[0]
         let gate = qSplit[1].reshaped(B, L, -1)
 
-        var keys = kProj(x)
-        var values = vProj(x)
+        var keys = qwen35Linear(kProj, x)
+        var values = qwen35Linear(vProj, x)
 
         queries = qNorm(queries).transposed(0, 2, 1, 3)
         keys = kNorm(keys.reshaped(B, L, kvHeads, -1)).transposed(0, 2, 1, 3)
@@ -407,7 +431,7 @@ final class Qwen35Attention: Module {
         .transposed(0, 2, 1, 3)
         .reshaped(B, L, -1)
 
-        return oProj(sigmoidMultiply(output, gate))
+        return qwen35Linear(oProj, sigmoidMultiply(output, gate))
     }
 }
 
@@ -444,7 +468,7 @@ final class Qwen35SparseMoeBlock: Module, UnaryLayer {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        var gates = gate(x)
+        var gates = qwen35Linear(gate, x)
         gates = MLX.softmax(gates, axis: -1, precise: true)
 
         let k = topK
@@ -459,7 +483,7 @@ final class Qwen35SparseMoeBlock: Module, UnaryLayer {
         let combined = (y * scores[.ellipsis, .newAxis]).sum(axis: -2)
 
         var sharedY = sharedExpert(x)
-        sharedY = sigmoid(sharedExpertGate(x)) * sharedY
+        sharedY = sigmoid(qwen35Linear(sharedExpertGate, x)) * sharedY
 
         return combined + sharedY
     }
@@ -604,7 +628,7 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
         var out = model(inputs, cache: cache)
         if let lmHead {
-            out = lmHead(out)
+            out = qwen35Linear(lmHead, out)
         } else {
             out = model.embedTokens.asLinear(out)
         }

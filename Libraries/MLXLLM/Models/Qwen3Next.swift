@@ -129,7 +129,7 @@ final class Qwen3NextMLP: Module, UnaryLayer {
     }
 
     func callAsFunction(_ x: MLXArray) -> MLXArray {
-        downProj(silu(gateProj(x)) * upProj(x))
+        qwen35Linear(downProj, silu(qwen35Linear(gateProj, x)) * qwen35Linear(upProj, x))
     }
 }
 
