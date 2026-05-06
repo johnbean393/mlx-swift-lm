@@ -986,7 +986,7 @@ extension Qwen35TextModel {
 
     public func dflashProjectLogits(_ hiddenStates: MLXArray) -> MLXArray {
         if let lmHead {
-            return lmHead(hiddenStates)
+            return qwen35Linear(lmHead, hiddenStates)
         }
         return model.embedTokens.asLinear(hiddenStates)
     }

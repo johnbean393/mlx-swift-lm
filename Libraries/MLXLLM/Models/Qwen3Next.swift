@@ -485,7 +485,7 @@ public class Qwen3NextModel: Module, LLMModel, KVCacheDimensionProvider {
     public func callAsFunction(_ inputs: MLXArray, cache: [KVCache]?) -> MLXArray {
         var out = model(inputs, cache: cache)
         if let lmHead {
-            out = lmHead(out)
+            out = qwen35Linear(lmHead, out)
         } else {
             out = model.embedTokens.asLinear(out)
         }
