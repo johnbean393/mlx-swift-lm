@@ -157,8 +157,8 @@ private func qwen35VerifyQMM(_ linear: QuantizedLinear, _ x: MLXArray) -> MLXArr
             MLXArray(outputDimensions),
         ],
         template: [("T", x.dtype)],
-        grid: (128, outputDimensions / 32, 1),
-        threadGroup: (128, 1, 1),
+        grid: (64, outputDimensions / 32, 1),
+        threadGroup: (64, 1, 1),
         outputShapes: [[16, outputDimensions]],
         outputDTypes: [x.dtype]
     )[0].reshaped(1, 16, outputDimensions)[0..., 0 ..< sequenceLength, 0...]
