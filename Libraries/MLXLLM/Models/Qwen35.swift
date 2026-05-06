@@ -631,6 +631,108 @@ extension Qwen35TextModel: LoRAModel {
     }
 }
 
+// MARK: - DFlash hooks
+
+public struct DFlashQwen35ForwardOutput {
+    public let logits: MLXArray
+    public let capturedHiddenStates: [Int: MLXArray]
+
+    public init(logits: MLXArray, capturedHiddenStates: [Int: MLXArray]) {
+        self.logits = logits
+        self.capturedHiddenStates = capturedHiddenStates
+    }
+}
+
+extension Qwen35TextModelInner {
+    func dflashForward(
+        inputIDs: MLXArray? = nil,
+        inputEmbeddings: MLXArray? = nil,
+        cache: [KVCache?]? = nil,
+        captureLayerIDs: Set<Int> = []
+    ) -> (hiddenStates: MLXArray, capturedHiddenStates: [Int: MLXArray]) {
+        precondition(inputIDs != nil || inputEmbeddings != nil)
+
+        var hiddenStates = inputEmbeddings ?? embedTokens(inputIDs!)
+        var capturedHiddenStates = [Int: MLXArray]()
+
+        var cacheArray = cache
+        if cacheArray == nil {
+            cacheArray = Array(repeating: nil as KVCache?, count: layers.count)
+        }
+
+        let faMask = createAttentionMask(h: hiddenStates, cache: cacheArray?[faIdx])
+        let ssmMask = createSSMMask(h: hiddenStates, cache: cacheArray?[ssmIdx] as? MambaCache)
+
+        for (i, layer) in layers.enumerated() {
+            let mask = layer.isLinear ? ssmMask : nil
+            let attnMask =
+                layer.isLinear
+                ? MLXFast.ScaledDotProductAttentionMaskMode.none : faMask
+            hiddenStates = layer(
+                hiddenStates, attentionMask: attnMask, ssmMask: mask, cache: cacheArray?[i])
+
+            if captureLayerIDs.contains(i) {
+                capturedHiddenStates[i] = hiddenStates
+            }
+        }
+
+        return (norm(hiddenStates), capturedHiddenStates)
+    }
+}
+
+extension Qwen35TextModel {
+    public var dflashHiddenSize: Int {
+        configuration.hiddenSize
+    }
+
+    public var dflashLayerCount: Int {
+        model.layers.count
+    }
+
+    public var dflashLinearLayerMask: [Bool] {
+        model.layers.map(\.isLinear)
+    }
+
+    public func dflashEmbedTokens(_ inputIDs: MLXArray) -> MLXArray {
+        model.embedTokens(inputIDs)
+    }
+
+    public func dflashProjectLogits(_ hiddenStates: MLXArray) -> MLXArray {
+        if let lmHead {
+            return lmHead(hiddenStates)
+        }
+        return model.embedTokens.asLinear(hiddenStates)
+    }
+
+    public func dflashForward(
+        inputIDs: MLXArray,
+        cache: [KVCache]? = nil,
+        captureLayerIDs: Set<Int> = []
+    ) -> DFlashQwen35ForwardOutput {
+        let output = model.dflashForward(
+            inputIDs: inputIDs,
+            cache: cache,
+            captureLayerIDs: captureLayerIDs)
+        return DFlashQwen35ForwardOutput(
+            logits: dflashProjectLogits(output.hiddenStates),
+            capturedHiddenStates: output.capturedHiddenStates)
+    }
+
+    public func dflashForward(
+        inputEmbeddings: MLXArray,
+        cache: [KVCache]? = nil,
+        captureLayerIDs: Set<Int> = []
+    ) -> DFlashQwen35ForwardOutput {
+        let output = model.dflashForward(
+            inputEmbeddings: inputEmbeddings,
+            cache: cache,
+            captureLayerIDs: captureLayerIDs)
+        return DFlashQwen35ForwardOutput(
+            logits: dflashProjectLogits(output.hiddenStates),
+            capturedHiddenStates: output.capturedHiddenStates)
+    }
+}
+
 // MARK: - Top-level Model
 
 public class Qwen35Model: Module, LLMModel, KVCacheDimensionProvider {
@@ -678,5 +780,49 @@ public class Qwen35Model: Module, LLMModel, KVCacheDimensionProvider {
 extension Qwen35Model: LoRAModel {
     public var loraLayers: [Module] {
         languageModel.model.layers
+    }
+}
+
+extension Qwen35Model {
+    public var dflashHiddenSize: Int {
+        languageModel.dflashHiddenSize
+    }
+
+    public var dflashLayerCount: Int {
+        languageModel.dflashLayerCount
+    }
+
+    public var dflashLinearLayerMask: [Bool] {
+        languageModel.dflashLinearLayerMask
+    }
+
+    public func dflashEmbedTokens(_ inputIDs: MLXArray) -> MLXArray {
+        languageModel.dflashEmbedTokens(inputIDs)
+    }
+
+    public func dflashProjectLogits(_ hiddenStates: MLXArray) -> MLXArray {
+        languageModel.dflashProjectLogits(hiddenStates)
+    }
+
+    public func dflashForward(
+        inputIDs: MLXArray,
+        cache: [KVCache]? = nil,
+        captureLayerIDs: Set<Int> = []
+    ) -> DFlashQwen35ForwardOutput {
+        languageModel.dflashForward(
+            inputIDs: inputIDs,
+            cache: cache,
+            captureLayerIDs: captureLayerIDs)
+    }
+
+    public func dflashForward(
+        inputEmbeddings: MLXArray,
+        cache: [KVCache]? = nil,
+        captureLayerIDs: Set<Int> = []
+    ) -> DFlashQwen35ForwardOutput {
+        languageModel.dflashForward(
+            inputEmbeddings: inputEmbeddings,
+            cache: cache,
+            captureLayerIDs: captureLayerIDs)
     }
 }
