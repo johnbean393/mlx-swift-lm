@@ -266,6 +266,68 @@ func gatedDeltaOps(
     return (y, state)
 }
 
+func gatedDeltaOpsWithTape(
+    q originalQ: MLXArray,
+    k originalK: MLXArray,
+    v: MLXArray,
+    g: MLXArray,
+    beta: MLXArray,
+    state initialState: MLXArray,
+    mask: MLXArray? = nil
+) -> (MLXArray, MLXArray, MLXArray) {
+    var q = originalQ
+    var k = originalK
+    let hv = v.dim(2)
+    let hk = k.dim(2)
+    if hv % hk == 0 {
+        let repeatFactor = hv / hk
+        if repeatFactor > 1 {
+            q = repeated(q, count: repeatFactor, axis: 2)
+            k = repeated(k, count: repeatFactor, axis: 2)
+        }
+    }
+
+    var state = initialState
+    var outputs = [MLXArray]()
+    var tape = [MLXArray]()
+    outputs.reserveCapacity(k.dim(1))
+    tape.reserveCapacity(k.dim(1))
+
+    for t in 0 ..< k.dim(1) {
+        let oldState = state
+        let decay: MLXArray
+        if g.ndim == 4 {
+            decay = g[0..., t, 0..., .newAxis, 0...]
+        } else if g.ndim == 3 {
+            decay = g[0..., t, 0..., .newAxis, .newAxis]
+        } else {
+            fatalError("Unsupported gating shape \(g.shape)")
+        }
+
+        let decayedState = state * decay
+        let kT = k[0..., t, 0..., .newAxis, 0...]
+        let kvMem = (decayedState * kT).sum(axis: -1)
+        var delta = (v[0..., t] - kvMem) * beta[0..., t, 0..., .newAxis]
+        var newState = decayedState + kT * delta[0..., 0..., 0..., .newAxis]
+        var y = (newState * q[0..., t, 0..., .newAxis, 0...]).sum(axis: -1)
+
+        if let mask {
+            let maskT = mask[0..., t]
+            let stateMask = maskT[0..., .newAxis, .newAxis, .newAxis]
+            let outputMask = maskT[0..., .newAxis, .newAxis]
+            newState = MLX.where(stateMask, newState, oldState)
+            delta = MLX.where(outputMask, delta, MLXArray.zeros(delta.shape, dtype: delta.dtype))
+            y = MLX.where(outputMask, y, MLXArray.zeros(y.shape, dtype: y.dtype))
+        }
+
+        state = newState
+        outputs.append(y)
+        tape.append(delta.asType(.float32))
+    }
+
+    return (stacked(outputs, axis: 1), state, stacked(tape, axis: 1))
+}
+
 // MARK: - Public API
 
 func gatedDeltaUpdate(
@@ -294,4 +356,36 @@ func gatedDeltaUpdate(
     }
 
     return gatedDeltaOps(q: q, k: k, v: v, g: g, beta: beta, state: state, mask: mask)
+}
+
+func gatedDeltaUpdateWithTape(
+    q: MLXArray,
+    k: MLXArray,
+    v: MLXArray,
+    a: MLXArray,
+    b: MLXArray,
+    aLog: MLXArray,
+    dtBias: MLXArray,
+    state: MLXArray? = nil,
+    mask: MLXArray? = nil
+) -> (MLXArray, MLXArray, MLXArray, MLXArray) {
+    let beta = sigmoid(b)
+    let g = computeGatedDeltaG(aLog, a, dtBias)
+
+    let B = q.dim(0)
+    let Dk = q.dim(3)
+    let Hv = v.dim(2)
+    let Dv = v.dim(3)
+
+    let state = state ?? MLXArray.zeros([B, Hv, Dv, Dk], dtype: q.dtype)
+    let (out, newState, tape) = gatedDeltaOpsWithTape(
+        q: q,
+        k: k,
+        v: v,
+        g: g,
+        beta: beta,
+        state: state,
+        mask: mask
+    )
+    return (out, newState, tape, g)
 }

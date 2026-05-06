@@ -273,17 +273,34 @@ final class Qwen35GatedDeltaNet: Module {
 
         var out: MLXArray
 
-        (out, state) = gatedDeltaUpdate(
-            q: qNormed,
-            k: kNormed,
-            v: v,
-            a: a,
-            b: b,
-            aLog: aLog,
-            dtBias: dtBias,
-            state: state,
-            mask: mask
-        )
+        if let rollbackCache = cache as? DFlashRecurrentRollbackCache, rollbackCache.isArmed {
+            let tape: MLXArray
+            let g: MLXArray
+            (out, state, tape, g) = gatedDeltaUpdateWithTape(
+                q: qNormed,
+                k: kNormed,
+                v: v,
+                a: a,
+                b: b,
+                aLog: aLog,
+                dtBias: dtBias,
+                state: state,
+                mask: mask
+            )
+            rollbackCache.recordTape(tape: tape, k: kNormed, g: g, qkv: qkv)
+        } else {
+            (out, state) = gatedDeltaUpdate(
+                q: qNormed,
+                k: kNormed,
+                v: v,
+                a: a,
+                b: b,
+                aLog: aLog,
+                dtBias: dtBias,
+                state: state,
+                mask: mask
+            )
+        }
 
         if let cache {
             cache[1] = state
@@ -580,7 +597,7 @@ public class Qwen35TextModel: Module, LLMModel, KVCacheDimensionProvider {
     public func newCache(parameters: GenerateParameters?) -> [KVCache] {
         return model.layers.map { layer in
             if layer.isLinear {
-                return MambaCache()
+                return DFlashRecurrentRollbackCache(convKernelSize: configuration.linearConvKernelDim)
             }
             return KVCacheSimple()
         }
