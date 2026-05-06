@@ -579,7 +579,7 @@ final class Qwen35Attention: Module {
         queries = applyRotaryPosition(rope, to: queries, cache: cache)
         keys = applyRotaryPosition(rope, to: keys, cache: cache)
 
-        let output = attentionWithCacheUpdate(
+        let output = qwen35AttentionWithCacheUpdate(
             queries: queries,
             keys: keys,
             values: values,
@@ -591,6 +591,64 @@ final class Qwen35Attention: Module {
         .reshaped(B, L, -1)
 
         return qwen35Linear(oProj, sigmoidMultiply(output, gate))
+    }
+
+    private func qwen35AttentionWithCacheUpdate(
+        queries: MLXArray,
+        keys: MLXArray,
+        values: MLXArray,
+        cache: KVCache?,
+        scale: Float,
+        mask: MLXFast.ScaledDotProductAttentionMaskMode
+    ) -> MLXArray {
+        guard let cache else {
+            return MLXFast.scaledDotProductAttention(
+                queries: queries,
+                keys: keys,
+                values: values,
+                scale: scale,
+                mask: mask
+            )
+        }
+
+        let cachedPrefixLength = cache.offset
+        let (cachedKeys, cachedValues) = cache.update(keys: keys, values: values)
+        guard cachedPrefixLength >= 1024, queries.dim(2) > 1 else {
+            return MLXFast.scaledDotProductAttention(
+                queries: queries,
+                keys: cachedKeys,
+                values: cachedValues,
+                scale: scale,
+                mask: mask
+            )
+        }
+
+        var chunks = [MLXArray]()
+        chunks.reserveCapacity(queries.dim(2))
+        for index in 0 ..< queries.dim(2) {
+            let keyEnd = cachedPrefixLength + index + 1
+            let chunkMask: MLXFast.ScaledDotProductAttentionMaskMode
+            switch mask {
+            case .array(let array):
+                chunkMask = .array(array[0..., 0..., index ..< (index + 1), 0 ..< keyEnd])
+            case .arrays(let arrays):
+                if let array = arrays.first {
+                    chunkMask = .array(array[0..., 0..., index ..< (index + 1), 0 ..< keyEnd])
+                } else {
+                    chunkMask = .none
+                }
+            case .causal, .none:
+                chunkMask = .none
+            }
+            chunks.append(MLXFast.scaledDotProductAttention(
+                queries: queries[0..., 0..., index ..< (index + 1), 0...],
+                keys: cachedKeys[0..., 0..., 0 ..< keyEnd, 0...],
+                values: cachedValues[0..., 0..., 0 ..< keyEnd, 0...],
+                scale: scale,
+                mask: chunkMask
+            ))
+        }
+        return concatenated(chunks, axis: 2)
     }
 }
 
