@@ -112,8 +112,10 @@ private final class GatedDeltaKernelManager: Sendable {
     let kernelMasked: MLXFast.MLXFastKernel?
     let tapeKernel: MLXFast.MLXFastKernel?
     let tapeKernelMasked: MLXFast.MLXFastKernel?
+    let kernelsDisabled: Bool
 
     private init() {
+        kernelsDisabled = ProcessInfo.processInfo.environment["DFLASH_DISABLE_GDN_METAL"] == "1"
         kernel = makeGatedDeltaKernel(hasMask: false)
         kernelMasked = makeGatedDeltaKernel(hasMask: true)
         tapeKernel = makeGatedDeltaTapeKernel(hasMask: false)
@@ -496,7 +498,7 @@ func gatedDeltaUpdate(
 
     let state = state ?? MLXArray.zeros([B, Hv, Dv, Dk], dtype: q.dtype)
 
-    if GatedDeltaKernelManager.shared.kernel != nil {
+    if !GatedDeltaKernelManager.shared.kernelsDisabled, GatedDeltaKernelManager.shared.kernel != nil {
         return gatedDeltaKernel(q: q, k: k, v: v, g: g, beta: beta, state: state, mask: mask)
     }
 
@@ -523,7 +525,7 @@ func gatedDeltaUpdateWithTape(
     let Dv = v.dim(3)
 
     let state = state ?? MLXArray.zeros([B, Hv, Dv, Dk], dtype: q.dtype)
-    if let result = gatedDeltaKernelWithTape(
+    if !GatedDeltaKernelManager.shared.kernelsDisabled, let result = gatedDeltaKernelWithTape(
         q: q,
         k: k,
         v: v,
