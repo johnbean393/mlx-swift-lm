@@ -671,8 +671,9 @@ extension Qwen35TextModelInner {
             hiddenStates = layer(
                 hiddenStates, attentionMask: attnMask, ssmMask: mask, cache: cacheArray?[i])
 
-            if captureLayerIDs.contains(i) {
-                capturedHiddenStates[i] = hiddenStates
+            let captureKey = i + 1
+            if captureLayerIDs.contains(captureKey) {
+                capturedHiddenStates[captureKey] = hiddenStates
             }
         }
 
