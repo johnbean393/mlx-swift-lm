@@ -34,6 +34,10 @@ public final class DFlashRecurrentRollbackCache: MambaCache {
     }
 
     public func rollback(acceptedDraftTokens: Int) {
+        rollback(committedSteps: max(0, acceptedDraftTokens) + 1)
+    }
+
+    public func rollback(committedSteps: Int) {
         guard let snapshot else {
             clearTransients()
             return
@@ -43,7 +47,7 @@ public final class DFlashRecurrentRollbackCache: MambaCache {
         self[1] = snapshot[safe: 1] ?? nil
 
         if let tape, let tapeK, let tapeG, let state = self[1] {
-            let acceptedSteps = max(0, acceptedDraftTokens) + 1
+            let acceptedSteps = max(0, committedSteps)
             if acceptedSteps > 0 {
                 self[1] = DFlashRecurrentRollbackCache.replay(
                     tape: tape[0..., 0 ..< min(acceptedSteps, tape.dim(1)), 0..., 0...],
