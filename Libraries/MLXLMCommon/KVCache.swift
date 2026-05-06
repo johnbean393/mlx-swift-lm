@@ -165,8 +165,9 @@ open class BaseKVCache: KVCache {
             return .none
         }
 
-        // For multi-token sequences
-        if returnArray || (windowSize != nil && n > windowSize!) {
+        // For cached multi-token sequences, materialize an offset-aware mask.
+        // A symbolic causal mask is only unambiguous when there is no cached prefix.
+        if returnArray || offset > 0 || (windowSize != nil && n > windowSize!) {
             return .array(createCausalMask(n: n, offset: offset, windowSize: windowSize))
         }
 
