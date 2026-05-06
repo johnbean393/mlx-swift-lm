@@ -498,7 +498,10 @@ func gatedDeltaUpdate(
 
     let state = state ?? MLXArray.zeros([B, Hv, Dv, Dk], dtype: .float32)
 
-    if !GatedDeltaKernelManager.shared.kernelsDisabled, GatedDeltaKernelManager.shared.kernel != nil {
+    if q.dim(1) == 1,
+        !GatedDeltaKernelManager.shared.kernelsDisabled,
+        GatedDeltaKernelManager.shared.kernel != nil
+    {
         return gatedDeltaKernel(q: q, k: k, v: v, g: g, beta: beta, state: state, mask: mask)
     }
 
